@@ -22,14 +22,23 @@ export async function fetchAllMicrodescs(
   kv: Deno.Kv,
   digests: string[],
 ): Promise<string> {
-  // Load cached microdescs from KV
+  // Load cached microdescs from KV, verifying integrity
   const have = new Map<string, string>();
   const needed = new Set(digests);
-  for await (const entry of kv.list<string>({ prefix: ["md"] })) {
-    const d = entry.key[1] as string;
+  let corrupt = 0;
+  for await (const entry of kv.list<string>({ prefix: ["dir", "microdesc"] })) {
+    const d = entry.key[2] as string;
     if (needed.has(d)) {
-      have.set(d, entry.value);
+      if (await microdescDigest(entry.value) === d) {
+        have.set(d, entry.value);
+      } else {
+        corrupt++;
+        kv.delete(["dir", "microdesc", d]);
+      }
     }
+  }
+  if (corrupt > 0) {
+    console.warn(`  ${corrupt} cached microdescs failed integrity check, purged`);
   }
   const missing = digests.filter((d) => !have.has(d));
   console.log(`  ${have.size} cached, ${missing.length} to fetch`);
@@ -50,7 +59,7 @@ export async function fetchAllMicrodescs(
       for (const md of mds) {
         const digest = await microdescDigest(md);
         have.set(digest, md);
-        kv.set(["md", digest], md, { expireIn: WEEK_MS });
+        kv.set(["dir", "microdesc", digest], md, { expireIn: WEEK_MS });
       }
       completed++;
       if (completed % 10 === 0 || completed === batches.length) {

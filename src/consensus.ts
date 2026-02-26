@@ -1,3 +1,4 @@
+import { crypto } from "jsr:@std/crypto";
 import { fetchFromAuthority } from "./fetch.ts";
 
 function parseFreshUntil(consensus: string): Date {
@@ -20,12 +21,12 @@ async function sha3(text: string): Promise<string> {
 }
 
 async function purgeConsensus(kv: Deno.Kv, hash: string, count: number): Promise<void> {
-  await Promise.all(Array.from({ length: count }, (_, i) => kv.delete(["consensus", hash, i])));
-  await kv.delete(["consensus", "ptr"]);
+  await Promise.all(Array.from({ length: count }, (_, i) => kv.delete(["dir", "consensus", "microdesc", hash, i])));
+  await kv.delete(["dir", "consensus", "microdesc", "ptr"]);
 }
 
 async function loadCachedConsensus(kv: Deno.Kv): Promise<string | null> {
-  const ptr = await kv.get<{ hash: string; chunks: number }>(["consensus", "ptr"]);
+  const ptr = await kv.get<{ hash: string; chunks: number }>(["dir", "consensus", "microdesc", "ptr"]);
   if (ptr.value === null) return null;
   const { hash, chunks: count } = ptr.value;
   // getMany limited to 10 keys at a time
@@ -33,7 +34,7 @@ async function loadCachedConsensus(kv: Deno.Kv): Promise<string | null> {
   for (let i = 0; i < count; i += 10) {
     const keys = Array.from(
       { length: Math.min(10, count - i) },
-      (_, j) => ["consensus", hash, i + j],
+      (_, j) => ["dir", "consensus", "microdesc", hash, i + j],
     );
     const entries = await kv.getMany<string[]>(keys);
     for (const e of entries) {
@@ -57,9 +58,9 @@ async function cacheConsensus(kv: Deno.Kv, text: string, expireIn: number): Prom
     chunks.push(text.slice(i, i + CHUNK_SIZE));
   }
   // Write chunks individually — atomic batch exceeds 800KB mutation limit
-  await Promise.all(chunks.map((c, i) => kv.set(["consensus", hash, i], c, { expireIn })));
+  await Promise.all(chunks.map((c, i) => kv.set(["dir", "consensus", "microdesc", hash, i], c, { expireIn })));
   // Atomic pointer swap — readers always see a consistent set of chunks
-  await kv.set(["consensus", "ptr"], { hash, chunks: chunks.length }, { expireIn });
+  await kv.set(["dir", "consensus", "microdesc", "ptr"], { hash, chunks: chunks.length }, { expireIn });
 }
 
 export async function fetchConsensus(kv: Deno.Kv): Promise<string> {
