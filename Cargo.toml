@@ -32,3 +32,4 @@ rand = "0.9"
 humantime = "2"
 futures = "0.3"
 async-compression = { version = "0.4", features = ["futures-io", "zlib", "xz", "zstd"] }
+base64ct = { version = "1.8", features = ["alloc"] }

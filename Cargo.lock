@@ -4172,6 +4172,7 @@ dependencies = [
  "anyhow",
  "arti-client",
  "async-compression",
+ "base64ct",
  "clap",
  "futures",
  "humantime",
