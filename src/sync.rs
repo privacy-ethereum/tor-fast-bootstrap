@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use base64ct::Encoding as _;
 use rand::Rng;
-use tor_checkable::{ExternallySigned, Timebound};
+use tor_checkable::{ExternallySigned, TimeValidityError, Timebound};
 use tor_netdoc::doc::netstatus::{Lifetime, MdConsensus};
 
 use arti_client::TorClient;
@@ -27,8 +27,10 @@ pub async fn sync_once(
     // --- Parse consensus ---
     let (_signed, _remainder, unchecked) =
         MdConsensus::parse(&consensus_text).context("parsing consensus")?;
+    let now = SystemTime::now();
     let consensus = unchecked
-        .dangerously_assume_timely()
+        .check_valid_at(&now)
+        .map_err(|e: TimeValidityError| anyhow::anyhow!("consensus not timely: {}", e))?
         .dangerously_assume_wellsigned();
 
     let lifetime = consensus.lifetime().clone();
