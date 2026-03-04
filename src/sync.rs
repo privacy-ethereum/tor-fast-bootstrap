@@ -157,17 +157,26 @@ pub async fn sync_once(
     Ok(lifetime)
 }
 
-/// Compute the relay-style sync delay: random time in the first half-interval
-/// after `fresh_until`.
+/// Compute the relay-style sync delay.
 ///
-/// Per dir-spec: "the cache downloads a new consensus document at a randomly
-/// chosen time in the first half-interval after its current consensus stops
-/// being fresh."
+/// Per dir-spec §5.3 (download-ns-from-auth):
+///
+///   "The cache downloads a new consensus document at a randomly chosen
+///    time in the first half-interval after its current consensus stops
+///    being fresh."
+///
+/// The "interval" is `valid_until - fresh_until`.  With typical values
+/// (fresh_until = valid_after + 1h, valid_until = valid_after + 3h) the
+/// interval is 2h, so the first half-interval is 1h.  We pick a random
+/// instant in `[fresh_until, fresh_until + interval/2]` and return the
+/// duration from now until that instant.
+///
+/// Ref: https://spec.torproject.org/dir-spec/directory-cache-operation.html#download-ns-from-auth
 pub fn relay_sync_delay(fresh_until: SystemTime, valid_until: SystemTime) -> Duration {
-    let half_interval = valid_until
+    let interval = valid_until
         .duration_since(fresh_until)
-        .unwrap_or(Duration::from_secs(1800))
-        / 2;
+        .unwrap_or(Duration::from_secs(3600));
+    let half_interval = interval / 2;
     let offset = rand::rng().random_range(Duration::ZERO..=half_interval);
     let target = fresh_until + offset;
     target

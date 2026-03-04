@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use digest::Digest;
+use tor_checkable::{ExternallySigned, Timebound};
 use tor_netdoc::doc::microdesc::{MdDigest, MicrodescReader};
 use tor_netdoc::doc::netstatus::MdConsensus;
 use tor_netdoc::AllowAnnotations;
@@ -22,6 +24,7 @@ pub struct ConsensusCache {
 struct ConsensusState {
     text: String,
     sha3_of_signed: [u8; 32],
+    valid_after: SystemTime,
 }
 
 impl ConsensusCache {
@@ -45,17 +48,24 @@ impl ConsensusCache {
             }
         };
         match MdConsensus::parse(&text) {
-            Ok((signed, _remainder, _unchecked)) => {
+            Ok((signed, _remainder, unchecked)) => {
                 let sha3: [u8; 32] = sha3::Sha3_256::digest(signed.as_bytes()).into();
+                let valid_after = unchecked
+                    .dangerously_assume_timely()
+                    .dangerously_assume_wellsigned()
+                    .lifetime()
+                    .valid_after();
                 tracing::info!(
-                    "loaded previous consensus ({} bytes, sha3={})",
+                    "loaded previous consensus ({} bytes, valid_after={}, sha3={})",
                     text.len(),
+                    humantime::format_rfc3339(valid_after),
                     hex::encode(sha3),
                 );
                 Self {
                     state: Some(ConsensusState {
                         text,
                         sha3_of_signed: sha3,
+                        valid_after,
                     }),
                 }
             }
@@ -79,6 +89,7 @@ impl ConsensusCache {
 
     /// Resolve a consensus response: apply diff if needed, then update cache.
     /// Returns the full consensus text ready for parsing.
+    /// Errors if the response contains an older consensus than what we have.
     pub fn resolve_response(&mut self, response: String) -> Result<String> {
         let consensus_text = if tor_consdiff::looks_like_diff(&response) {
             let old_text = self
@@ -100,13 +111,31 @@ impl ConsensusCache {
             response
         };
 
-        // Parse to extract signed portion and compute SHA3-256
-        let (signed, _remainder, _unchecked) =
+        // Parse to extract signed portion, valid_after, and compute SHA3-256
+        let (signed, _remainder, unchecked) =
             MdConsensus::parse(&consensus_text).context("parsing consensus for digest")?;
+        let new_valid_after = unchecked
+            .dangerously_assume_timely()
+            .dangerously_assume_wellsigned()
+            .lifetime()
+            .valid_after();
+
+        // Reject if older than what we already have
+        if let Some(ref state) = self.state {
+            if new_valid_after < state.valid_after {
+                anyhow::bail!(
+                    "ignoring older consensus (valid_after={}, have={})",
+                    humantime::format_rfc3339(new_valid_after),
+                    humantime::format_rfc3339(state.valid_after),
+                );
+            }
+        }
+
         let sha3: [u8; 32] = sha3::Sha3_256::digest(signed.as_bytes()).into();
         self.state = Some(ConsensusState {
             text: consensus_text.clone(),
             sha3_of_signed: sha3,
+            valid_after: new_valid_after,
         });
 
         Ok(consensus_text)
