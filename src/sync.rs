@@ -1,5 +1,6 @@
 //! Consensus + microdescriptor sync logic with relay-style scheduling.
 
+use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
@@ -68,29 +69,45 @@ pub async fn sync_once(
     output_dir: &Path,
     consensus_cache: &mut ConsensusCache,
     md_cache: &mut MicrodescCache,
-) -> Result<Lifetime> {
-    // --- Fetch consensus (with diff if we have a previous one) ---
-    let diff_hex = consensus_cache.diff_hex();
-    tracing::info!(
-        "fetching consensus{}...",
-        if diff_hex.is_some() { " (requesting diff)" } else { "" }
-    );
-    let consensus_bytes = crate::dir::get(
-        client,
-        "/tor/status-vote/current/consensus-microdesc",
-        diff_hex.as_deref(),
-    )
-    .await?;
-    let response_text =
-        String::from_utf8(consensus_bytes).context("consensus response is not valid UTF-8")?;
-
-    // --- Apply diff if needed, update cache ---
-    let consensus_text = consensus_cache.resolve_response(response_text)?;
+) -> Result<Option<Lifetime>> {
+    // --- Fetch consensus (skip if still fresh) ---
+    let old_digest = consensus_cache.diff_hex();
+    let consensus_text = if consensus_cache.is_fresh() {
+        tracing::info!("cached consensus is still fresh, skipping fetch");
+        consensus_cache
+            .text()
+            .context("consensus marked fresh but no cached text")?
+            .to_string()
+    } else {
+        let diff_hex = old_digest.clone();
+        tracing::info!(
+            "fetching consensus{}...",
+            if diff_hex.is_some() { " (requesting diff)" } else { "" }
+        );
+        let consensus_bytes = match crate::dir::get(
+            client,
+            "/tor/status-vote/current/consensus-microdesc",
+            diff_hex.as_deref(),
+        )
+        .await?
+        {
+            Some(bytes) => bytes,
+            None => {
+                tracing::info!("server returned 304 Not Modified, consensus unchanged");
+                return Ok(None);
+            }
+        };
+        let response_text = String::from_utf8(consensus_bytes)
+            .context("consensus response is not valid UTF-8")?;
+        consensus_cache.resolve_response(response_text)?
+    };
 
     // --- Fetch and validate authority certificates ---
     let authority_ids = trusted_authority_ids();
     tracing::info!("fetching authority certificates...");
-    let certs_bytes = crate::dir::get(client, "/tor/keys/all", None).await?;
+    let certs_bytes = crate::dir::get(client, "/tor/keys/all", None)
+        .await?
+        .context("unexpected 304 for /tor/keys/all")?;
     let certs_text =
         String::from_utf8(certs_bytes).context("authority certs are not valid UTF-8")?;
     let now = SystemTime::now();
@@ -162,11 +179,14 @@ pub async fn sync_once(
             let path = format!("/tor/micro/d/{}", digests_str.join("-"));
 
             match crate::dir::get(client, &path, None).await {
-                Ok(bytes) => {
+                Ok(Some(bytes)) => {
                     let text = String::from_utf8(bytes)
                         .context("microdesc response is not valid UTF-8")?;
                     let added = md_cache.ingest(&text);
                     tracing::debug!("batch {}: added {} microdescs", batch_idx + 1, added);
+                }
+                Ok(None) => {
+                    tracing::warn!("microdesc batch {} returned 304", batch_idx + 1);
                 }
                 Err(e) => {
                     tracing::warn!("microdesc batch {} failed: {}", batch_idx + 1, e);
@@ -214,7 +234,56 @@ pub async fn sync_once(
         serde_json::to_string_pretty(&metadata)?.as_bytes(),
     )?;
 
-    Ok(lifetime)
+    // --- Create bootstrap archive if consensus changed or file missing ---
+    let new_digest = consensus_cache.diff_hex();
+    if new_digest != old_digest || !output_dir.join("bootstrap.zip.br").exists() {
+        write_bootstrap_archive(output_dir, consensus_text.as_bytes(), certs_text.as_bytes(), &microdescs_blob)?;
+    } else {
+        tracing::info!("consensus unchanged, skipping bootstrap archive");
+    }
+
+    Ok(Some(lifetime))
+}
+
+/// Create `bootstrap.zip.br`: a store-only zip of the bootstrap files, brotli-compressed.
+fn write_bootstrap_archive(dir: &Path, consensus: &[u8], certs: &[u8], microdescs: &[u8]) -> Result<()> {
+    use zip::write::SimpleFileOptions;
+    use zip::CompressionMethod;
+
+    // Build store-only zip in memory
+    let mut zip_buf = Vec::new();
+    {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_buf));
+        let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+
+        zip.start_file("bootstrap/consensus-microdesc.txt", opts)?;
+        zip.write_all(consensus)?;
+
+        zip.start_file("bootstrap/authority-certs.txt", opts)?;
+        zip.write_all(certs)?;
+
+        zip.start_file("bootstrap/microdescs.txt", opts)?;
+        zip.write_all(microdescs)?;
+
+        zip.finish()?;
+    }
+
+    // Brotli-compress the zip
+    let mut br_buf = Vec::new();
+    {
+        let mut compressor = brotli::CompressorWriter::new(&mut br_buf, 4096, 11, 22);
+        compressor.write_all(&zip_buf)?;
+        compressor.flush()?;
+    }
+
+    atomic_write(dir, "bootstrap.zip.br", &br_buf)?;
+    tracing::info!(
+        "wrote bootstrap.zip.br ({} bytes zip, {} bytes brotli, {:.0}% ratio)",
+        zip_buf.len(),
+        br_buf.len(),
+        br_buf.len() as f64 / zip_buf.len() as f64 * 100.0,
+    );
+    Ok(())
 }
 
 /// Compute the relay-style sync delay.

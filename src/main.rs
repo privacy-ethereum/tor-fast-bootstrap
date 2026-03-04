@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     loop {
         match sync::sync_once(&client, &cli.output_dir, &mut consensus_cache, &mut md_cache).await
         {
-            Ok(lifetime) => {
+            Ok(Some(lifetime)) => {
                 if cli.once {
                     return Ok(());
                 }
@@ -64,6 +64,11 @@ async fn main() -> Result<()> {
                     humantime::format_rfc3339(SystemTime::now() + delay),
                 );
                 tokio::time::sleep(delay).await;
+            }
+            Ok(None) => {
+                let retry = Duration::from_secs(60);
+                tracing::info!("retrying in {}", humantime::format_duration(retry));
+                tokio::time::sleep(retry).await;
             }
             Err(e) => {
                 tracing::error!("sync failed: {:#}", e);

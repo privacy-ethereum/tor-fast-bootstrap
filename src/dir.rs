@@ -12,11 +12,13 @@ use arti_client::TorClient;
 /// Uses the TorClient's circuit manager to get a managed dir circuit,
 /// opens a BEGINDIR stream, and sends a raw HTTP/1.0 GET request.
 /// The response body is decompressed automatically.
+///
+/// Returns `Ok(None)` on HTTP 304 Not Modified.
 pub async fn get(
     client: &TorClient<tor_rtcompat::PreferredRuntime>,
     path: &str,
     diff_from: Option<&str>,
-) -> Result<Vec<u8>> {
+) -> Result<Option<Vec<u8>>> {
     let netdir = client
         .dirmgr()
         .netdir(Timeliness::Timely)
@@ -75,7 +77,10 @@ pub async fn get(
         .parse()
         .unwrap_or(0);
 
-    if status != 200 {
+    if status == 304 {
+        return Ok(None);
+    }
+    if !(200..300).contains(&status) {
         bail!("GET {} returned status {}", path, status);
     }
 
@@ -89,7 +94,7 @@ pub async fn get(
     let mut body = Vec::new();
     let _ = reader.read_to_end(&mut body).await;
 
-    decompress(encoding.as_deref(), &body).await
+    decompress(encoding.as_deref(), &body).await.map(Some)
 }
 
 async fn decompress(encoding: Option<&str>, data: &[u8]) -> Result<Vec<u8>> {

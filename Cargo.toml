@@ -31,3 +31,5 @@ base64ct = { version = "1.8", features = ["alloc"] }
 sha3 = "0.10"
 digest = "0.10"
 hex = "0.4"
+zip = { version = "2", default-features = false }
+brotli = "8"

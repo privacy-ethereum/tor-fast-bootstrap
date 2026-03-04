@@ -10,11 +10,10 @@ use tor_netdoc::doc::microdesc::{MdDigest, MicrodescReader};
 use tor_netdoc::doc::netstatus::MdConsensus;
 use tor_netdoc::AllowAnnotations;
 
-/// Extract `valid-after` timestamp from raw consensus text.
-/// The line format is: `valid-after YYYY-MM-DD HH:MM:SS`
-fn parse_valid_after(text: &str) -> Option<SystemTime> {
+/// Parse a consensus timestamp line like `valid-after YYYY-MM-DD HH:MM:SS`.
+fn parse_timestamp(text: &str, prefix: &str) -> Option<SystemTime> {
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("valid-after ") {
+        if let Some(rest) = line.strip_prefix(prefix) {
             let rfc3339 = format!("{}Z", rest.trim().replace(' ', "T"));
             return humantime::parse_rfc3339(&rfc3339).ok();
         }
@@ -36,6 +35,7 @@ struct ConsensusState {
     text: String,
     sha3_of_signed: [u8; 32],
     valid_after: SystemTime,
+    fresh_until: SystemTime,
 }
 
 impl ConsensusCache {
@@ -58,10 +58,17 @@ impl ConsensusCache {
                 return Self::new();
             }
         };
-        let valid_after = match parse_valid_after(&text) {
+        let valid_after = match parse_timestamp(&text, "valid-after ") {
             Some(t) => t,
             None => {
                 tracing::warn!("no valid-after in cached consensus");
+                return Self::new();
+            }
+        };
+        let fresh_until = match parse_timestamp(&text, "fresh-until ") {
+            Some(t) => t,
+            None => {
+                tracing::warn!("no fresh-until in cached consensus");
                 return Self::new();
             }
         };
@@ -69,9 +76,10 @@ impl ConsensusCache {
             Ok((signed, _remainder, _unchecked)) => {
                 let sha3: [u8; 32] = sha3::Sha3_256::digest(signed.as_bytes()).into();
                 tracing::info!(
-                    "loaded previous consensus ({} bytes, valid_after={}, sha3={})",
+                    "loaded previous consensus ({} bytes, valid_after={}, fresh_until={}, sha3={})",
                     text.len(),
                     humantime::format_rfc3339(valid_after),
+                    humantime::format_rfc3339(fresh_until),
                     hex::encode(sha3),
                 );
                 Self {
@@ -79,6 +87,7 @@ impl ConsensusCache {
                         text,
                         sha3_of_signed: sha3,
                         valid_after,
+                        fresh_until,
                     }),
                 }
             }
@@ -98,6 +107,14 @@ impl ConsensusCache {
     /// The previous consensus text (needed to apply diffs).
     pub fn text(&self) -> Option<&str> {
         self.state.as_ref().map(|s| s.text.as_str())
+    }
+
+    /// Whether the cached consensus is still fresh (i.e. `now < fresh_until`).
+    pub fn is_fresh(&self) -> bool {
+        self.state
+            .as_ref()
+            .map(|s| SystemTime::now() < s.fresh_until)
+            .unwrap_or(false)
     }
 
     /// Resolve a consensus response: apply diff if needed, then update cache.
@@ -124,9 +141,11 @@ impl ConsensusCache {
             response
         };
 
-        // Extract valid_after from text and compute SHA3-256 of signed portion
-        let new_valid_after = parse_valid_after(&consensus_text)
+        // Extract timestamps from text and compute SHA3-256 of signed portion
+        let new_valid_after = parse_timestamp(&consensus_text, "valid-after ")
             .context("no valid-after in consensus response")?;
+        let new_fresh_until = parse_timestamp(&consensus_text, "fresh-until ")
+            .context("no fresh-until in consensus response")?;
 
         // Reject if older than what we already have
         if let Some(ref state) = self.state {
@@ -146,6 +165,7 @@ impl ConsensusCache {
             text: consensus_text.clone(),
             sha3_of_signed: sha3,
             valid_after: new_valid_after,
+            fresh_until: new_fresh_until,
         });
 
         Ok(consensus_text)
