@@ -1,16 +1,34 @@
 import { zipSync } from "npm:fflate@0.8";
-import { fetchConsensus, parseValidUntil, extractDigests } from "./consensus.ts";
+import {
+  fetchConsensus,
+  parseFreshUntil,
+  parseValidUntil,
+  extractDigests,
+} from "./consensus.ts";
 import { fetchAllMicrodescs } from "./microdescs.ts";
+import type { NodeSelector } from "./node-selector.ts";
 
 export interface CachedBundle {
   raw: Uint8Array;
   gzip: Uint8Array;
   brotli: Uint8Array;
+  freshUntil: Date;
   validUntil: Date;
 }
 
 let cached: CachedBundle | null = null;
-let building = false;
+
+export function getCurrentBundle(): CachedBundle | null {
+  return cached;
+}
+
+export function setBundle(bundle: CachedBundle): void {
+  cached = bundle;
+}
+
+// ---------------------------------------------------------------------------
+// Compression
+// ---------------------------------------------------------------------------
 
 async function gzipCompress(data: Uint8Array): Promise<Uint8Array> {
   const cs = new CompressionStream("gzip");
@@ -26,7 +44,6 @@ async function brotliCompress(data: Uint8Array): Promise<Uint8Array> {
     stdin: "piped",
     stdout: "piped",
   }).spawn();
-  // Write stdin and read stdout concurrently to avoid pipe buffer deadlock
   const [, output] = await Promise.all([
     async function () {
       const writer = proc.stdin.getWriter();
@@ -38,44 +55,44 @@ async function brotliCompress(data: Uint8Array): Promise<Uint8Array> {
   return output.stdout;
 }
 
-export async function buildZip(kv: Deno.Kv): Promise<CachedBundle> {
+// ---------------------------------------------------------------------------
+// Build
+// ---------------------------------------------------------------------------
+
+export async function buildBundle(
+  kv: Deno.Kv,
+  selector: NodeSelector,
+  newerThan?: Date,
+): Promise<CachedBundle> {
   console.log("Fetching consensus...");
-  const consensus = await fetchConsensus(kv);
-  const vu = parseValidUntil(consensus);
-  console.log(`  Valid until: ${vu.toISOString()}`);
+  const consensus = await fetchConsensus(kv, selector, newerThan);
+
+  const freshUntil = parseFreshUntil(consensus);
+  const validUntil = parseValidUntil(consensus);
+  console.log(`  Valid until: ${validUntil.toISOString()}`);
+
+  // Update node pool from the fresh consensus so microdesc fetches use relays
+  selector.updateFromConsensus(consensus);
 
   const digests = extractDigests(consensus);
   console.log(`  ${digests.length} microdescriptor digests`);
 
   console.log("Fetching microdescriptors...");
-  const microdescs = await fetchAllMicrodescs(kv, digests);
+  const microdescs = await fetchAllMicrodescs(kv, digests, selector);
   const mdCount = (microdescs.match(/^onion-key$/gm) || []).length;
   console.log(`  ${mdCount} microdescriptors fetched`);
 
   const enc = new TextEncoder();
   const raw = zipSync({
-    [`tor-bootstrap-data/consensus.txt`]: [enc.encode(consensus), { level: 0 }],
+    "tor-bootstrap-data/consensus.txt": [enc.encode(consensus), { level: 0 }],
     "tor-bootstrap-data/microdescs.txt": [enc.encode(microdescs), { level: 0 }],
   });
 
   console.log("Compressing...");
-  const [gzip, brotli] = await Promise.all([gzipCompress(raw), brotliCompress(raw)]);
+  const [gzip, brotli] = await Promise.all([
+    gzipCompress(raw),
+    brotliCompress(raw),
+  ]);
 
-  cached = { raw, gzip, brotli, validUntil: vu };
-  return cached;
-}
-
-export async function getBundle(kv: Deno.Kv): Promise<CachedBundle> {
-  if (cached && new Date() < cached.validUntil) {
-    return cached;
-  }
-  if (!building) {
-    building = true;
-    try {
-      cached = await buildZip(kv);
-    } finally {
-      building = false;
-    }
-  }
-  return cached!;
+  return { raw, gzip, brotli, freshUntil, validUntil };
 }

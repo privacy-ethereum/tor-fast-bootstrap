@@ -1,22 +1,34 @@
-import { buildZip, getBundle } from "./src/zip.ts";
+import { getCurrentBundle } from "./src/zip.ts";
+import { NodeSelector } from "./src/node-selector.ts";
+import { AUTHORITIES } from "./src/config.ts";
+import { startRefreshLoop } from "./src/refresh.ts";
 
 const kv = await Deno.openKv();
 
-// Build on startup
-console.log("Starting up...");
-const initial = await buildZip(kv);
-function fmtSize(bytes: number): string {
-  return bytes < 1024 * 1024
-    ? `${(bytes / 1024).toFixed(0)} KB`
-    : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-console.log(`  raw: ${fmtSize(initial.raw.byteLength)}, gzip: ${fmtSize(initial.gzip.byteLength)}, brotli: ${fmtSize(initial.brotli.byteLength)}`);
-console.log("Ready.");
+// Cold-start node pool: equal-weight authorities
+const selector = new NodeSelector(
+  AUTHORITIES.map((a) => ({
+    host: a.host,
+    port: a.port,
+    name: a.name,
+    bandwidth: 1,
+  })),
+);
 
-const handler = async (req: Request) => {
-  if (new URL(req.url).pathname === "/") {
-    const bundle = await getBundle(kv);
-    const ae = req.headers.get("Accept-Encoding") ?? "";
+// ---------------------------------------------------------------------------
+// Request handler
+// ---------------------------------------------------------------------------
+
+const handler = (_req: Request) => {
+  if (new URL(_req.url).pathname === "/") {
+    const bundle = getCurrentBundle();
+    if (!bundle) {
+      return new Response("Bootstrap data not yet available. Please retry.", {
+        status: 503,
+        headers: { "Retry-After": "30" },
+      });
+    }
+    const ae = _req.headers.get("Accept-Encoding") ?? "";
     let body: Uint8Array;
     let encoding: string | undefined;
     if (ae.includes("br")) {
@@ -33,13 +45,15 @@ const handler = async (req: Request) => {
       "Content-Disposition": 'attachment; filename="tor-bootstrap-data.zip"',
       "Content-Length": String(body.byteLength),
     };
-    if (encoding) {
-      headers["Content-Encoding"] = encoding;
-    }
+    if (encoding) headers["Content-Encoding"] = encoding;
     return new Response(Uint8Array.from(body), { headers });
   }
   return new Response("Not Found", { status: 404 });
 };
+
+// ---------------------------------------------------------------------------
+// Network / TLS helpers
+// ---------------------------------------------------------------------------
 
 function getLanAddress(): string | null {
   for (const iface of Deno.networkInterfaces()) {
@@ -84,6 +98,10 @@ async function generateSelfSignedCert(): Promise<{ cert: string; key: string }> 
   return { cert: new TextDecoder().decode(output.stdout), key: keyPem };
 }
 
+// ---------------------------------------------------------------------------
+// Start servers immediately, then refresh in background
+// ---------------------------------------------------------------------------
+
 const lan = getLanAddress();
 
 function tryServe(
@@ -119,3 +137,6 @@ tryServe(8080, {}, "http");
 console.log("Generating self-signed certificate...");
 const tls = await generateSelfSignedCert();
 tryServe(8443, { cert: tls.cert, key: tls.key }, "https");
+
+// Background refresh (non-blocking — runs forever)
+startRefreshLoop(kv, selector);
