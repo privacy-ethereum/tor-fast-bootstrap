@@ -24,6 +24,24 @@ Requires Rust 1.89+. Arti dependencies are pulled from [crates.io](https://crate
 cargo build --release
 ```
 
+### Docker
+
+```
+docker build --network=host -t tor-fast-bootstrap .
+docker run --network=host tor-fast-bootstrap
+```
+
+For production, run detached with restart policy and log retention:
+
+```
+docker run -d --restart unless-stopped \
+  --log-opt max-size=10m --log-opt max-file=3 \
+  --network=host --name tor-fast-bootstrap \
+  tor-fast-bootstrap
+```
+
+`--network=host` is needed at build time so the builder can fetch crates, and at run time so the daemon can reach Tor directory authorities. If your Docker bridge network has working outbound connectivity, you can use `-p 42298:42298` instead of `--network=host` at run time.
+
 ## Usage
 
 ```
