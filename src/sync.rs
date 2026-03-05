@@ -265,6 +265,11 @@ fn write_bootstrap_archive(dir: &Path, consensus: &[u8], certs: &[u8], microdesc
         encoder.finish()?;
     }
 
+    // ETag: SHA3-256 of the uncompressed zip archive
+    use digest::Digest;
+    let etag = hex::encode(sha3::Sha3_256::digest(&zip_buf));
+    atomic_write(dir, "bootstrap.etag", etag.as_bytes())?;
+
     atomic_write(dir, "bootstrap.zip", &zip_buf)?;
     atomic_write(dir, "bootstrap.zip.gz", &gz_buf)?;
     atomic_write(dir, "bootstrap.zip.br", &br_buf)?;

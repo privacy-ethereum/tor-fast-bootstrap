@@ -26,6 +26,10 @@ struct Cli {
     /// HTTP server port (0 to disable)
     #[arg(short, long, default_value_t = 42298)]
     port: u16,
+
+    /// Serve uncompressed /bootstrap.zip (off by default; production should use /bootstrap.zip.br)
+    #[arg(long)]
+    allow_uncompressed: bool,
 }
 
 #[tokio::main]
@@ -46,7 +50,8 @@ async fn main() -> Result<()> {
         let output_dir = cli.output_dir.clone();
         let port = cli.port;
         tokio::spawn(async move {
-            if let Err(e) = server::run(output_dir, port).await {
+            let allow_uncompressed = cli.allow_uncompressed;
+            if let Err(e) = server::run(output_dir, port, allow_uncompressed).await {
                 tracing::error!("HTTP server failed: {:#}", e);
             }
         });

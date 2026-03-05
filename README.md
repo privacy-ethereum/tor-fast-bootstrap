@@ -37,6 +37,7 @@ tor-fast-bootstrap --output-dir ./data
 | `-o, --output-dir` | (required) | Directory for cached documents and bootstrap archive |
 | `-p, --port` | `42298` | HTTP server port (`0` to disable) |
 | `--once` | off | Exit after the first successful sync instead of looping |
+| `--allow-uncompressed` | off | Serve uncompressed `/bootstrap.zip` (production should use `/bootstrap.zip.br`) |
 
 ### Environment
 
@@ -63,6 +64,8 @@ Navigate to `http://localhost:42298/` to open the built-in web interface. Click 
 Data endpoints return `503 Service Unavailable` before the first successful sync.
 
 The server negotiates `Accept-Encoding` and serves pre-compressed `.br` or `.gz` variants from disk — no on-the-fly compression.
+
+Bootstrap endpoints (`/bootstrap.zip` and `/bootstrap.zip.br`) return an `ETag` header derived from a SHA3-256 hash of the archive. Clients can send `If-None-Match` to receive a `304 Not Modified` response when the content hasn't changed.
 
 ## Output files
 
